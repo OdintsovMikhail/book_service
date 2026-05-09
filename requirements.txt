@@ -1,4 +1,8 @@
-fastapi[standard]
-uvicorn[standard]>=0.29.0
-pyodbc>=5.1.0
-pydantic>=2.7.0
+fastapi
+uvicorn[standard]
+pyodbc
+python-dotenv
+pydantic[email]
+httpx
+azure-servicebus
+pytest

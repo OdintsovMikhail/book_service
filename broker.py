@@ -35,7 +35,7 @@ def _listen_client() -> ServiceBusClient:
 async def publish(source: str, payload: dict) -> None:
     # Embed the source into the payload so the consumer can route it
     payload["source"] = source
-    logging.log("sending message to %s queue", QUEUE_NAME)
+    logging.info("sending message to %s queue", QUEUE_NAME)
 
     async with _send_client() as client:
         async with client.get_queue_sender(queue_name=QUEUE_NAME) as sender:
@@ -45,4 +45,4 @@ async def publish(source: str, payload: dict) -> None:
             )
             await sender.send_messages(msg)
 
-            logging.log("mesage sent")
+            logging.info("mesage sent")

@@ -3,6 +3,8 @@
 #
 # Stage 1 – Static Analysis  : flake8 syntax / style check
 # Stage 2 – Tests            : pytest, results published as JUnit + artifacts
+# Stage 3 – Build            : install deps, zip artifact, publish
+# Stage 4 – Deploy           : deploy zip to Azure Web App
 # ──────────────────────────────────────────────────────────────────────────────
 
 trigger:
@@ -23,6 +25,10 @@ pool:
 variables:
   PYTHON_VERSION: "3.12"
   PIP_CACHE_DIR: $(Pipeline.Workspace)/.pip
+  # ── Update these two variables to match your environment ──────────────────
+  AZURE_SERVICE_CONNECTION: "dc2f6e71-37a3-4df3-8c22-f160dfdb1c32"  # Azure DevOps service connection
+  WEBAPP_NAME: "BC-book-service"             # Azure Web App resource name
+  # ──────────────────────────────────────────────────────────────────────────
 
 stages:
 
@@ -37,14 +43,12 @@ stages:
 
       steps:
 
-        # 1. Pin Python version
         - task: UsePythonVersion@0
           displayName: "Use Python $(PYTHON_VERSION)"
           inputs:
             versionSpec: "$(PYTHON_VERSION)"
             addToPath: true
 
-        # 2. Cache pip downloads between runs
         - task: Cache@2
           displayName: "Cache pip packages"
           inputs:
@@ -53,17 +57,11 @@ stages:
               pip | "$(Agent.OS)"
             path: $(PIP_CACHE_DIR)
 
-        # 3. Install only flake8 (keep this stage lean and fast)
         - script: |
             python -m pip install --upgrade pip
             pip install flake8
           displayName: "Install flake8"
 
-        # 4. Run flake8
-        #    --max-line-length 120  – matches most modern Python style guides
-        #    --statistics           – summary counts per error code
-        #    --count                – total error count at the end
-        #    Output is written to flake8-report.txt so it can be uploaded
         - script: |
             flake8 . \
               --exclude=.venv,__pycache__,.git \
@@ -74,10 +72,6 @@ stages:
               | tee flake8-report.txt
           displayName: "Run flake8"
 
-        # 5. Publish the lint report as a pipeline artifact
-        #    PublishPipelineArtifact@1 is used instead of PublishBuildArtifacts@1
-        #    to avoid the "Value cannot be null / securityNamespace" error that
-        #    the older task can throw on some Azure DevOps organisations.
         - task: PublishPipelineArtifact@1
           displayName: "Publish flake8 report"
           condition: always()
@@ -101,14 +95,12 @@ stages:
 
       steps:
 
-        # 1. Pin Python version
         - task: UsePythonVersion@0
           displayName: "Use Python $(PYTHON_VERSION)"
           inputs:
             versionSpec: "$(PYTHON_VERSION)"
             addToPath: true
 
-        # 2. Cache pip downloads
         - task: Cache@2
           displayName: "Cache pip packages"
           inputs:
@@ -117,18 +109,12 @@ stages:
               pip | "$(Agent.OS)"
             path: $(PIP_CACHE_DIR)
 
-        # 3. Install runtime + test dependencies
-        #    pydantic[email] is required because schemas.py uses EmailStr
         - script: |
             python -m pip install --upgrade pip
             pip install -r requirements.txt
             pip install pytest pytest-cov "pydantic[email]"
           displayName: "Install dependencies"
 
-        # 4. Run pytest
-        #    --junitxml  – machine-readable results (picked up by PublishTestResults)
-        #    --cov       – coverage report in XML (Cobertura) + terminal summary
-        #    -v          – verbose output so failures are easy to read in logs
         - script: |
             mkdir -p test-results
             pytest test_book_service.py \
@@ -139,7 +125,6 @@ stages:
               --cov-report=term-missing
           displayName: "Run pytest"
 
-        # 5. Publish JUnit test results (shows pass/fail in the Azure Pipelines UI)
         - task: PublishTestResults@2
           displayName: "Publish test results"
           condition: always()
@@ -149,16 +134,12 @@ stages:
             failTaskOnFailedTests: true
             testRunTitle: "pytest – book_service"
 
-        # 6. Publish code coverage (Cobertura XML → Coverage tab in the UI)
         - task: PublishCodeCoverageResults@2
           displayName: "Publish code coverage"
           condition: always()
           inputs:
             summaryFileLocation: "test-results/coverage.xml"
 
-        # 7. Upload the entire test-results folder as a pipeline artifact
-        #    Same fix as Stage 1 – use PublishPipelineArtifact@1 instead of
-        #    PublishBuildArtifacts@1 to avoid the securityNamespace null error.
         - task: PublishPipelineArtifact@1
           displayName: "Publish test artifacts"
           condition: always()
@@ -166,3 +147,65 @@ stages:
             targetPath: "test-results"
             artifact: "pytest-results"
             publishLocation: "pipeline"
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  STAGE 3 – Build                                                        ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+- stage: Build
+  displayName: "Stage 3 – Build"
+  dependsOn: Tests
+  condition: succeeded()
+
+  jobs:
+    - job: Build
+      displayName: "Install deps & zip application"
+
+      steps:
+
+        - task: UsePythonVersion@0
+          displayName: "Use Python $(PYTHON_VERSION)"
+          inputs:
+            versionSpec: "$(PYTHON_VERSION)"
+            addToPath: true
+
+        - script: |
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
+          displayName: "Install dependencies"
+
+        - script: |
+            zip -r app.zip . -x "*.git*" "*__pycache__*" "*test-results*" "*test_*.py*"
+          displayName: "Archive app"
+
+        - publish: app.zip
+          artifact: drop
+
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║  STAGE 4 – Deploy (Azure Web App)                                       ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+- stage: Deploy
+  displayName: "Stage 4 – Deploy to Azure Web App"
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+  jobs:
+    - deployment: DeployWebApp
+      environment: "dev"
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+
+              - download: current
+                artifact: drop
+
+              - task: AzureWebApp@1
+                displayName: "Deploy to Azure Web App"
+                inputs:
+                  azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                  appType: "webAppLinux"
+                  appName: "$(WEBAPP_NAME)"
+                  package: "$(Pipeline.Workspace)/drop/app.zip"
+                  runtimeStack: "PYTHON|3.12"
