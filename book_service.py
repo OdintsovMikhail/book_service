@@ -17,6 +17,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 urls = get_api_urls()
 S = DB_SCHEMA
 
+GQL_USER_BY_ID = """
+    query GetUserById($id: Int!) {
+        userById(id: $id) {
+            id
+            username
+            email
+        }
+    }
+"""
+
 
 def _call(method: str, url: str, **kwargs) -> httpx.Response:
     try:
@@ -25,6 +35,22 @@ def _call(method: str, url: str, **kwargs) -> httpx.Response:
         logger.error("Failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Downstream service unreachable: {exc}")
     return resp
+
+
+def _get_user_by_id(user_id: int) -> dict | None:
+    resp = _call(
+        "POST",
+        f"{urls['user']}/graphql",
+        json={"query": GQL_USER_BY_ID, "variables": {"id": user_id}},
+    )
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="UserService error")
+
+    body = resp.json()
+    if "errors" in body:
+        return None                         # user not found
+
+    return body["data"]["userById"]
 
 
 # ── GET /book/{title} ─────────────────────────────────────────────────────────
@@ -76,13 +102,9 @@ class BookCommentPayload(BookCommentIn):
 
 @app.post("/book/comment", status_code=202)
 async def add_book_comment(payload: BookCommentPayload):
-    resp = _call("GET", f"{urls['user']}/user/id/{payload.user_id}")
-    if resp.status_code == 404:
+    user = _get_user_by_id(payload.user_id)
+    if not user:
         exc = HTTPException(status_code=404, detail="User not found")
-        logger.error("Failed: %s", exc)
-        raise exc
-    if resp.status_code != 200:
-        exc = HTTPException(status_code=502, detail="UserService error")
         logger.error("Failed: %s", exc)
         raise exc
 
